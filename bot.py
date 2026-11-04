@@ -500,7 +500,9 @@ class GuildPlayer:
         was_paused = vc.is_paused()
         old = vc.source
         vc.source = self.make_source(self.current.file_path, position)  # this also un-pauses
-        old.cleanup()
+        # The audio thread may be mid-read on the old source; closing it right away
+        # would end playback as if the song had finished. Close it a moment later.
+        asyncio.get_running_loop().call_later(2, old.cleanup)
         if was_paused:
             vc.pause()
         self._reset_clock(position)
@@ -550,6 +552,10 @@ class GuildPlayer:
     async def send(self, **kwargs) -> discord.Message | None:
         if not self.text_channel:
             return None
+        # discord.py retries a send when Discord answers with a 5xx error, even if Discord
+        # already posted the message, which shows up as a duplicate. A nonce lets Discord
+        # recognise the retry and return the first message instead.
+        kwargs.setdefault("nonce", random.getrandbits(63))
         try:
             return await self.text_channel.send(**kwargs)
         except discord.HTTPException:
