@@ -1,3 +1,6 @@
-discord.py[voice]>=2.4
+discord.py[voice]>=2.7
+# davey 0.2 changed its API and discord.py 2.7.1 doesn't support it yet:
+# with 0.2 the bot "plays" but Discord drops the unencrypted audio (silence).
+davey>=0.1.7,<0.2
 yt-dlp[default]>=2025.10.22
 python-dotenv>=1.0
