@@ -437,6 +437,10 @@ class GuildPlayer:
             vc.play(source, after=self._after)
             self._reset_clock()
             self.prefetch_next()
+            conn = getattr(vc, "_connection", None)
+            log.info("Playing %s | voice connected=%s dave_version=%s can_encrypt=%s",
+                     track.page_url, vc.is_connected(),
+                     getattr(conn, "dave_protocol_version", "?"), getattr(conn, "can_encrypt", "?"))
             view = PlayerControls(self)
             embed = self.now_playing_embed()
             if interaction is not None:
@@ -1246,5 +1250,5 @@ bot.tree.add_command(playlist_group)
 
 
 if __name__ == "__main__":
-    discord.utils.setup_logging(level=logging.INFO)
+    discord.utils.setup_logging(level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO))
     bot.run(TOKEN, log_handler=None)
