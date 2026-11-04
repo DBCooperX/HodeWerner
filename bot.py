@@ -283,6 +283,7 @@ class GuildPlayer:
         self._lock = asyncio.Lock()
         self._skip_requested = False
         self._stopping = False
+        self._leaving = False
         self._idle_task: asyncio.Task | None = None
         self._started_at = 0.0
         self._paused_at: float | None = None
@@ -505,6 +506,15 @@ class GuildPlayer:
         self._reset_clock(position)
 
     async def stop(self, reason: str | None = None) -> None:
+        if self._leaving:
+            return  # already stopping (two events can arrive at once)
+        self._leaving = True
+        try:
+            await self._stop(reason)
+        finally:
+            self._leaving = False
+
+    async def _stop(self, reason: str | None) -> None:
         self.queue.clear()
         self._stopping = bool(self.current)
         self.cancel_idle()
@@ -732,11 +742,14 @@ class HodeWerner(discord.Client):
             await guild.leave()
 
     async def on_voice_state_update(self, member, before, after) -> None:
+        if member.bot:
+            return  # our own join/leave also fires this event; only react to people
         vc = member.guild.voice_client
         if not vc or not vc.channel:
             return
-        # Leave when everyone else has left the voice channel.
-        if all(m.bot for m in vc.channel.members):
+        left_our_channel = before.channel == vc.channel and after.channel != vc.channel
+        # Leave when the last person has left the voice channel.
+        if left_our_channel and all(m.bot for m in vc.channel.members):
             await self.player(member.guild).stop("👋 Everyone left the voice channel, so I left too.")
 
 
