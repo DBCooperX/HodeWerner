@@ -2,6 +2,7 @@
 # Installs HodeWerner inside a Debian 12/13 container or VM.
 # Run as root from the repo folder: bash deploy/install.sh
 set -euo pipefail
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 APP_DIR=/opt/hodewerner
 APP_USER=hodewerner

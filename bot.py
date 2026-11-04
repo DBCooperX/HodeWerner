@@ -12,6 +12,8 @@ import logging
 import os
 import random
 import re
+import subprocess
+import sys
 import time
 from collections import deque
 from dataclasses import asdict, dataclass
@@ -49,9 +51,34 @@ BASE_YDL_OPTS = {
 if COOKIES:
     BASE_YDL_OPTS["cookiefile"] = COOKIES
 
-# Reconnect if YouTube drops the stream mid-song.
-FFMPEG_BEFORE = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
-FFMPEG_OPTIONS = "-vn"
+
+
+class YTDLPAudio(discord.FFmpegPCMAudio):
+    """yt-dlp downloads the audio and pipes it into FFmpeg.
+
+    Letting yt-dlp do the download (instead of handing FFmpeg the googlevideo URL)
+    avoids 403 errors, because yt-dlp sends the headers and tokens YouTube expects.
+    """
+
+    def __init__(self, page_url: str, start: int = 0):
+        cmd = [sys.executable, "-m", "yt_dlp", "--quiet", "--no-warnings", "--no-playlist",
+               "--no-part", "-f", "bestaudio/best", "-o", "-"]
+        if COOKIES:
+            cmd += ["--cookies", COOKIES]
+        cmd.append(page_url)
+        self._ytdlp = subprocess.Popen(cmd, stdout=subprocess.PIPE)  # its errors go to the log
+        # "-ss" after the input skips ahead by decoding, which works on a pipe.
+        options = "-vn" + (f" -ss {start}" if start else "")
+        super().__init__(self._ytdlp.stdout, pipe=True, options=options)
+
+    def cleanup(self) -> None:
+        super().cleanup()
+        if self._ytdlp.poll() is None:
+            self._ytdlp.kill()
+        try:
+            self._ytdlp.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
 
 LOOP_OFF, LOOP_SONG, LOOP_QUEUE = "off", "song", "queue"
 LOOP_LABELS = {LOOP_OFF: "Off", LOOP_SONG: "This song", LOOP_QUEUE: "Whole queue"}
@@ -102,7 +129,6 @@ class Track:
     thumbnail: str | None
     requested_by: discord.Member
     autoplay: bool = False
-    stream_url: str | None = None
 
     def link(self) -> str:
         title = self.title.replace("[", "(").replace("]", ")")
@@ -287,12 +313,8 @@ class GuildPlayer:
     def queue_seconds(self) -> int:
         return sum(t.duration or 0 for t in self.queue)
 
-    def make_source(self, stream_url: str, start: int = 0) -> discord.AudioSource:
-        before = FFMPEG_BEFORE + (f" -ss {start}" if start else "")
-        return discord.PCMVolumeTransformer(
-            discord.FFmpegPCMAudio(stream_url, before_options=before, options=FFMPEG_OPTIONS),
-            volume=self.volume,
-        )
+    def make_source(self, page_url: str, start: int = 0) -> discord.AudioSource:
+        return discord.PCMVolumeTransformer(YTDLPAudio(page_url, start), volume=self.volume)
 
     # ---- embeds
     def footer_text(self) -> str:
@@ -358,14 +380,13 @@ class GuildPlayer:
         while self.queue:
             track = self.queue.popleft()
             try:
-                # Fetch a fresh stream URL now, since they expire after a few hours.
+                # Check the video is playable and fill in details before starting.
                 info = await run_blocking(_stream_info, track.page_url)
                 track.duration = track.duration or info.get("duration")
                 track.thumbnail = track.thumbnail or best_thumbnail(info)
                 if track.title == "Unknown":
                     track.title = info.get("title") or track.title
-                track.stream_url = info["url"]
-                source = self.make_source(track.stream_url)
+                source = self.make_source(track.page_url)
             except Exception as e:  # noqa: BLE001
                 log.warning("Could not play %s: %s", track.page_url, e)
                 await self.send(embed=discord.Embed(
@@ -435,11 +456,11 @@ class GuildPlayer:
     def seek(self, position: int) -> None:
         """Jump to a position in the current song by restarting FFmpeg there."""
         vc = self.voice
-        if not vc or not self.current or not self.current.stream_url or not vc.source:
+        if not vc or not self.current or not vc.source:
             raise RuntimeError("Nothing is playing.")
         was_paused = vc.is_paused()
         old = vc.source
-        vc.source = self.make_source(self.current.stream_url, position)  # this also un-pauses
+        vc.source = self.make_source(self.current.page_url, position)  # this also un-pauses
         old.cleanup()
         if was_paused:
             vc.pause()
