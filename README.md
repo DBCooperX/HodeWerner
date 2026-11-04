@@ -17,6 +17,8 @@ It runs in a Proxmox LXC container at home. The bot is written in Python with di
 
 ## Commands
 
+Type `/help` in Discord to see this list there.
+
 **Adding music**
 
 | Command | What it does |

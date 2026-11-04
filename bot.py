@@ -1,6 +1,6 @@
 """HodeWerner: plays YouTube audio in a Discord voice channel.
 
-Slash commands: /play, /search, /queue, /nowplaying, /skip, /pause, /resume, /stop,
+Slash commands: /help, /play, /search, /queue, /nowplaying, /skip, /pause, /resume, /stop,
 /seek, /replay, /move, /remove, /shuffle, /clear, /loop, /autoplay, /volume,
 /playlist save|play|list|show|delete
 The bot only serves the server named by GUILD_ID and leaves any other server.
@@ -828,6 +828,57 @@ async def enqueue(interaction: discord.Interaction, tracks: list[Track],
     e.set_footer(text=f"Added by {member.display_name}")
     await interaction.followup.send(embed=e)
     await p.refresh_np()
+
+
+# ---------------------------------------------------------------- commands: help
+
+HELP_SECTIONS = [
+    ("🎵 Adding music", [
+        ("/play <link or words>", "Play a song or YouTube playlist, or add it to the queue"),
+        ("/search <words>", "Pick from the top 5 YouTube results"),
+        ("/playlist play <name>", "Add a saved playlist (optionally shuffled)"),
+    ]),
+    ("⏯️ Playback", [
+        ("/pause · /resume", "Pause and continue"),
+        ("/skip", "Skip to the next song"),
+        ("/seek <time>", "Jump to a time, like 1:30"),
+        ("/replay", "Start the song again"),
+        ("/stop", "Stop, clear the queue and leave"),
+        ("/volume <0-100>", "Set the volume"),
+        ("/loop", "Repeat this song or the whole queue"),
+        ("/autoplay", "Keep playing related songs when the queue runs out"),
+    ]),
+    ("📋 Queue", [
+        ("/nowplaying", "Current song with a progress bar"),
+        ("/queue [page]", "Show what's coming up"),
+        ("/move <from> <to>", "Reorder (to 1 = play next)"),
+        ("/remove <position>", "Remove a song"),
+        ("/shuffle", "Shuffle the queue"),
+        ("/clear", "Empty the queue, keep the current song"),
+    ]),
+    ("💾 Saved playlists", [
+        ("/playlist save <name>", "Save the current song and queue"),
+        ("/playlist list", "Show all saved playlists"),
+        ("/playlist show <name>", "Show the songs in one"),
+        ("/playlist delete <name>", "Delete one"),
+    ]),
+]
+
+
+@bot.tree.command(name="help", description="Show all HodeWerner commands")
+@in_home_server()
+async def help_command(interaction: discord.Interaction):
+    e = discord.Embed(
+        title="🎧 HodeWerner commands",
+        description="The buttons under **Now playing** also pause, skip, stop, loop, autoplay and shuffle.",
+        color=BLUE,
+    )
+    for name, rows in HELP_SECTIONS:
+        e.add_field(name=name, value="\n".join(f"`{cmd}` {desc}" for cmd, desc in rows), inline=False)
+    if bot.user and bot.user.display_avatar:
+        e.set_thumbnail(url=bot.user.display_avatar.url)
+    e.set_footer(text="Controls only work when you're in the same voice channel as the bot.")
+    await interaction.response.send_message(embed=e, ephemeral=True)
 
 
 # ---------------------------------------------------------------- commands: adding music
