@@ -129,7 +129,7 @@ DISCORD_TOKEN=your-bot-token
 GUILD_ID=your-server-id
 ```
 
-The other settings in that file are optional: `IDLE_TIMEOUT` (seconds before leaving when nothing plays, `0` to never leave), `MAX_PLAYLIST` (most songs taken from one playlist), `DEFAULT_VOLUME` (percent) and `AUTOPLAY` (`on` to start with autoplay turned on).
+The other settings in that file are optional: `IDLE_TIMEOUT` (seconds before leaving when nothing plays, `0` to never leave), `MAX_PLAYLIST` (most songs taken from one playlist), `DEFAULT_VOLUME` (percent) `AUTOPLAY` (`on` to start with autoplay turned on) and `CACHE_MAX_MB` (how much disk the song cache may use, default 500).
 
 Save with Ctrl+O, Enter, then Ctrl+X. Start the bot and watch the log:
 
@@ -153,6 +153,8 @@ Run these inside the container (`pct enter <CTID>`):
 | Stop the bot | `systemctl stop hodewerner` |
 | Update yt-dlp now | `systemctl start hodewerner-update` |
 | See when the next update runs | `systemctl list-timers hodewerner-update.timer` |
+
+Songs are downloaded to a cache in `/opt/hodewerner/data/cache` before they play, and the next song downloads while the current one plays. The oldest songs are deleted once the cache passes 500 MB.
 
 **Saved playlists** live in `/opt/hodewerner/data/playlists.json` inside the container. Updates keep them. Proxmox backups of the container include them too.
 

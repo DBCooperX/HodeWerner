@@ -12,8 +12,6 @@ import logging
 import os
 import random
 import re
-import subprocess
-import sys
 import time
 from collections import deque
 from dataclasses import asdict, dataclass
@@ -33,6 +31,8 @@ MAX_PLAYLIST = int(os.environ.get("MAX_PLAYLIST", "100"))  # max songs taken fro
 DEFAULT_VOLUME = int(os.environ.get("DEFAULT_VOLUME", "50"))  # percent
 AUTOPLAY_DEFAULT = os.environ.get("AUTOPLAY", "off").lower() in ("1", "on", "true", "yes")
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
+CACHE_DIR = DATA_DIR / "cache"
+CACHE_MAX_MB = int(os.environ.get("CACHE_MAX_MB", "500"))  # downloaded songs kept for replays
 IDLE_TEXT = f"{IDLE_TIMEOUT // 60} min" if IDLE_TIMEOUT >= 60 else f"{IDLE_TIMEOUT} seconds"
 
 log = logging.getLogger("hodewerner")
@@ -47,38 +47,12 @@ BASE_YDL_OPTS = {
     "format": "bestaudio/best",
     "quiet": True,
     "no_warnings": True,
+    "noprogress": True,
 }
 if COOKIES:
     BASE_YDL_OPTS["cookiefile"] = COOKIES
 
 
-
-class YTDLPAudio(discord.FFmpegPCMAudio):
-    """yt-dlp downloads the audio and pipes it into FFmpeg.
-
-    Letting yt-dlp do the download (instead of handing FFmpeg the googlevideo URL)
-    avoids 403 errors, because yt-dlp sends the headers and tokens YouTube expects.
-    """
-
-    def __init__(self, page_url: str, start: int = 0):
-        cmd = [sys.executable, "-m", "yt_dlp", "--quiet", "--no-warnings", "--no-playlist",
-               "--no-part", "-f", "bestaudio/best", "-o", "-"]
-        if COOKIES:
-            cmd += ["--cookies", COOKIES]
-        cmd.append(page_url)
-        self._ytdlp = subprocess.Popen(cmd, stdout=subprocess.PIPE)  # its errors go to the log
-        # "-ss" after the input skips ahead by decoding, which works on a pipe.
-        options = "-vn" + (f" -ss {start}" if start else "")
-        super().__init__(self._ytdlp.stdout, pipe=True, options=options)
-
-    def cleanup(self) -> None:
-        super().cleanup()
-        if self._ytdlp.poll() is None:
-            self._ytdlp.kill()
-        try:
-            self._ytdlp.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            pass
 
 LOOP_OFF, LOOP_SONG, LOOP_QUEUE = "off", "song", "queue"
 LOOP_LABELS = {LOOP_OFF: "Off", LOOP_SONG: "This song", LOOP_QUEUE: "Whole queue"}
@@ -129,6 +103,8 @@ class Track:
     thumbnail: str | None
     requested_by: discord.Member
     autoplay: bool = False
+    file_path: str | None = None
+    download: "asyncio.Task | None" = None
 
     def link(self) -> str:
         title = self.title.replace("[", "(").replace("]", ")")
@@ -186,10 +162,36 @@ def _related(vid: str, n: int = 15) -> list[dict]:
     return [e for e in info.get("entries", []) if e and e.get("url")]
 
 
-def _stream_info(page_url: str) -> dict:
-    opts = {**BASE_YDL_OPTS, "noplaylist": True}
+def _download(page_url: str) -> tuple[dict, str]:
+    """Download a song's audio into the cache. Returns (info, file path)."""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    opts = {**BASE_YDL_OPTS, "noplaylist": True,
+            "outtmpl": str(CACHE_DIR / "%(id)s.%(ext)s"), "overwrites": False}
     with yt_dlp.YoutubeDL(opts) as ydl:
-        return ydl.extract_info(page_url, download=False)
+        info = ydl.extract_info(page_url, download=True)
+    downloads = info.get("requested_downloads") or []
+    path = downloads[0].get("filepath") if downloads else None
+    if not path or not os.path.exists(path):
+        raise RuntimeError("Download finished but the file is missing.")
+    os.utime(path)  # mark as recently used for the cache cleanup
+    _prune_cache(keep=path)
+    return info, path
+
+
+def _prune_cache(keep: str) -> None:
+    """Delete the oldest cached songs once the cache is over CACHE_MAX_MB."""
+    try:
+        files = sorted((f for f in CACHE_DIR.iterdir() if f.is_file()), key=lambda f: f.stat().st_mtime)
+        total = sum(f.stat().st_size for f in files)
+        for f in files:
+            if total <= CACHE_MAX_MB * 1024 * 1024:
+                break
+            if str(f) == keep:
+                continue
+            total -= f.stat().st_size
+            f.unlink(missing_ok=True)
+    except OSError as e:
+        log.warning("Cache cleanup failed: %s", e)
 
 
 async def run_blocking(func, *args):
@@ -313,8 +315,38 @@ class GuildPlayer:
     def queue_seconds(self) -> int:
         return sum(t.duration or 0 for t in self.queue)
 
-    def make_source(self, page_url: str, start: int = 0) -> discord.AudioSource:
-        return discord.PCMVolumeTransformer(YTDLPAudio(page_url, start), volume=self.volume)
+    def make_source(self, file_path: str, start: int = 0) -> discord.AudioSource:
+        before = f"-ss {start}" if start else ""
+        return discord.PCMVolumeTransformer(
+            discord.FFmpegPCMAudio(file_path, before_options=before, options="-vn"),
+            volume=self.volume,
+        )
+
+    async def fetch(self, track: Track) -> None:
+        """Download a track (once), filling in its details. Safe to call more than once."""
+        if track.file_path and os.path.exists(track.file_path):
+            return
+        if track.download is None or track.download.done() and track.download.exception():
+            track.download = asyncio.ensure_future(run_blocking(_download, track.page_url))
+        info, path = await asyncio.shield(track.download)
+        track.file_path = path
+        track.duration = track.duration or info.get("duration")
+        track.thumbnail = track.thumbnail or best_thumbnail(info)
+        if track.title == "Unknown":
+            track.title = info.get("title") or track.title
+
+    def prefetch_next(self) -> None:
+        """Start downloading the next song in the background, so it starts without a gap."""
+        if self.queue:
+            nxt = self.queue[0]
+
+            async def _go():
+                try:
+                    await self.fetch(nxt)
+                except Exception as e:  # noqa: BLE001
+                    log.info("Prefetch of %s failed (will retry when it plays): %s", nxt.page_url, e)
+
+            asyncio.create_task(_go())
 
     # ---- embeds
     def footer_text(self) -> str:
@@ -357,6 +389,8 @@ class GuildPlayer:
             await self._play_next(interaction)
 
     async def _play_next(self, interaction: discord.Interaction | None) -> None:
+        if self.voice and (self.voice.is_playing() or self.voice.is_paused()):
+            return  # something is already playing; nothing to do
         finished = self.current
         skipped = self._skip_requested
         self._skip_requested = False
@@ -380,13 +414,8 @@ class GuildPlayer:
         while self.queue:
             track = self.queue.popleft()
             try:
-                # Check the video is playable and fill in details before starting.
-                info = await run_blocking(_stream_info, track.page_url)
-                track.duration = track.duration or info.get("duration")
-                track.thumbnail = track.thumbnail or best_thumbnail(info)
-                if track.title == "Unknown":
-                    track.title = info.get("title") or track.title
-                source = self.make_source(track.page_url)
+                await self.fetch(track)
+                source = self.make_source(track.file_path)
             except Exception as e:  # noqa: BLE001
                 log.warning("Could not play %s: %s", track.page_url, e)
                 await self.send(embed=discord.Embed(
@@ -396,6 +425,10 @@ class GuildPlayer:
                 ))
                 continue
 
+            if self._stopping or not vc.is_connected():  # stopped while downloading
+                source.cleanup()
+                self._stopping = False
+                return
             self.cancel_idle()
             self.current = track
             vid = video_id(track.page_url)
@@ -403,6 +436,7 @@ class GuildPlayer:
                 self.history.append(vid)
             vc.play(source, after=self._after)
             self._reset_clock()
+            self.prefetch_next()
             view = PlayerControls(self)
             embed = self.now_playing_embed()
             if interaction is not None:
@@ -456,11 +490,11 @@ class GuildPlayer:
     def seek(self, position: int) -> None:
         """Jump to a position in the current song by restarting FFmpeg there."""
         vc = self.voice
-        if not vc or not self.current or not vc.source:
+        if not vc or not self.current or not self.current.file_path or not vc.source:
             raise RuntimeError("Nothing is playing.")
         was_paused = vc.is_paused()
         old = vc.source
-        vc.source = self.make_source(self.current.page_url, position)  # this also un-pauses
+        vc.source = self.make_source(self.current.file_path, position)  # this also un-pauses
         old.cleanup()
         if was_paused:
             vc.pause()
@@ -517,6 +551,8 @@ class GuildPlayer:
                 pass
 
     async def refresh_np(self) -> None:
+        if self.current:
+            self.prefetch_next()  # the next song may have changed
         if self.np_message and self.current:
             try:
                 await self.np_message.edit(embed=self.now_playing_embed(), view=PlayerControls(self))
@@ -751,7 +787,7 @@ async def enqueue(interaction: discord.Interaction, tracks: list[Track],
         await vc.move_to(member.voice.channel)
     p.cancel_idle()
 
-    busy = vc.is_playing() or vc.is_paused() or p.current is not None
+    busy = vc.is_playing() or vc.is_paused() or p.current is not None or p._lock.locked()
     wait_before = p.queue_seconds() + (
         max(0, (p.current.duration or 0) - int(p.elapsed())) if p.current else 0)
     # Drop autoplay picks once a person adds something.
