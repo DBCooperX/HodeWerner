@@ -20,6 +20,8 @@ BRIDGE="${BRIDGE:-vmbr0}"
 CORES="${CORES:-1}"
 MEMORY="${MEMORY:-1024}"
 DISK_GB="${DISK_GB:-4}"
+DEBIAN="${DEBIAN:-}"                     # 12 or 13; empty = newest available
+NESTING="${NESTING:-1}"                  # set to 0 if the container won't start
 
 command -v pct >/dev/null || { echo "Run this on the Proxmox host."; exit 1; }
 
@@ -53,8 +55,10 @@ else
 
   echo "==> Finding the newest Debian template"
   pveam update >/dev/null
-  TEMPLATE="$(pveam available --section system | awk '{print $2}' | grep -E '^debian-1[2-9]-standard' | sort -V | tail -1)"
-  [ -n "$TEMPLATE" ] || { echo "No Debian template found."; exit 1; }
+  ARCH="$(dpkg --print-architecture)"    # amd64 or arm64; the template must match the host
+  PATTERN="^debian-${DEBIAN:-1[2-9]}-standard_.*_${ARCH}\.tar"
+  TEMPLATE="$(pveam available --section system | awk '{print $2}' | grep -E "$PATTERN" | sort -V | tail -1)"
+  [ -n "$TEMPLATE" ] || { echo "No Debian template found for $ARCH."; exit 1; }
   if ! pveam list "$TEMPLATE_STORAGE" | grep -q "$TEMPLATE"; then
     pveam download "$TEMPLATE_STORAGE" "$TEMPLATE"
   fi
@@ -65,13 +69,28 @@ else
     --cores "$CORES" --memory "$MEMORY" --swap 512 \
     --rootfs "$STORAGE:$DISK_GB" \
     --net0 "name=eth0,bridge=$BRIDGE,ip=dhcp" \
-    --unprivileged 1 --features nesting=1 \
-    --onboot 1 --start 1
+    --unprivileged 1 --features "nesting=$NESTING" \
+    --onboot 1
+  pct start "$CTID" || true
+fi
+
+sleep 3
+if [ "$(pct status "$CTID" | awk '{print $2}')" != running ]; then
+  echo
+  echo "ERROR: container $CTID did not start."
+  echo "See why with:  pct start $CTID --debug 2>&1 | tail -40"
+  echo "Things to try: remove it with 'pct destroy $CTID', then run this script again with"
+  echo "  DEBIAN=12 in front (older template), or NESTING=0 in front, or both."
+  exit 1
 fi
 
 echo "==> Waiting for network"
-for _ in $(seq 1 30); do
+for i in $(seq 1 30); do
   pct exec "$CTID" -- getent hosts deb.debian.org >/dev/null 2>&1 && break
+  if [ "$i" = 30 ]; then
+    echo "ERROR: container $CTID has no internet. Check BRIDGE=$BRIDGE and that DHCP works."
+    exit 1
+  fi
   sleep 2
 done
 

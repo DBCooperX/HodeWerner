@@ -108,6 +108,8 @@ You can change the defaults with environment variables:
 | `CORES` | `1` | CPU cores |
 | `MEMORY` | `1024` | RAM in MB |
 | `DISK_GB` | `4` | Disk size in GB |
+| `DEBIAN` | newest | Debian version for the template, `12` or `13` |
+| `NESTING` | `1` | Set to `0` if the container won't start |
 
 Put them in front of the command, for example `CTID=150 STORAGE=local-zfs MEMORY=512 bash -c "$(curl ...)"`.
 
