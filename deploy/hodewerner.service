@@ -1,0 +1,15 @@
+[Unit]
+Description=HodeWerner Discord bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=hodewerner
+WorkingDirectory=/opt/hodewerner
+ExecStart=/opt/hodewerner/.venv/bin/python bot.py
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

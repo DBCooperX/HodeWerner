@@ -1,0 +1,7 @@
+[Unit]
+Description=Update yt-dlp for HodeWerner and restart the bot
+
+[Service]
+Type=oneshot
+ExecStart=/opt/hodewerner/.venv/bin/pip install -q -U "yt-dlp[default]"
+ExecStartPost=/bin/systemctl try-restart hodewerner.service
