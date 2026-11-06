@@ -762,6 +762,20 @@ class HodeWerner(discord.Client):
 bot = HodeWerner()
 
 
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
+    """Always answer, so a failed command never leaves "The application did not respond"."""
+    if isinstance(error, app_commands.CheckFailure):
+        return
+    log.error("Command %s failed", interaction.command and interaction.command.qualified_name, exc_info=error)
+    try:
+        send = (interaction.followup.send if interaction.response.is_done()
+                else interaction.response.send_message)
+        await send("Something went wrong with that command. Please try again.", ephemeral=True)
+    except discord.HTTPException:
+        pass
+
+
 def in_home_server():
     async def predicate(interaction: discord.Interaction) -> bool:
         return interaction.guild is not None and interaction.guild.id == GUILD_ID
@@ -796,6 +810,31 @@ async def require_same_channel(interaction: discord.Interaction) -> GuildPlayer 
     return p
 
 
+async def join_voice(interaction: discord.Interaction,
+                     channel: discord.VoiceChannel | discord.StageChannel) -> discord.VoiceClient | None:
+    """Connect to a voice channel. On failure, tell the user why and return None."""
+    perms = channel.permissions_for(interaction.guild.me)
+    if not (perms.connect and perms.speak):
+        await interaction.followup.send(embed=info_embed(
+            f"⚠️ I'm not allowed to join or speak in {channel.mention}. "
+            "Give me the **Connect** and **Speak** permissions there.", RED))
+        return None
+    try:
+        return await channel.connect(self_deaf=True, timeout=20)
+    except (asyncio.TimeoutError, discord.ClientException, discord.HTTPException, OSError) as e:
+        log.warning("Could not join voice channel %s: %r", channel.id, e)
+        vc = interaction.guild.voice_client
+        if vc:  # throw away the half-open connection so the next try starts clean
+            try:
+                await vc.disconnect(force=True)
+            except Exception:  # noqa: BLE001
+                pass
+        await interaction.followup.send(embed=info_embed(
+            f"⚠️ I couldn't join {channel.mention}: Discord didn't answer in time. "
+            "Please try again in a moment.", RED))
+        return None
+
+
 async def enqueue(interaction: discord.Interaction, tracks: list[Track],
                   playlist_title: str | None = None, playlist_icon: str = "📜") -> None:
     """Join the user's channel, add tracks, and report. The interaction must already be responded to."""
@@ -805,7 +844,9 @@ async def enqueue(interaction: discord.Interaction, tracks: list[Track],
     vc = p.voice
     if vc is None:
         p._stopping = False
-        vc = await member.voice.channel.connect(self_deaf=True)
+        vc = await join_voice(interaction, member.voice.channel)
+        if vc is None:
+            return
     elif vc.channel != member.voice.channel:
         await vc.move_to(member.voice.channel)
     p.cancel_idle()
@@ -1206,13 +1247,7 @@ class PlaylistGroup(app_commands.Group):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.guild is not None and interaction.guild.id == GUILD_ID
 
-    async def on_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
-        if isinstance(error, app_commands.CheckFailure):
-            return
-        log.exception("Playlist command failed", exc_info=error)
-        send = (interaction.followup.send if interaction.response.is_done()
-                else interaction.response.send_message)
-        await send("Something went wrong with that playlist command.", ephemeral=True)
+    # Errors are handled by on_app_command_error for all commands.
 
 
 playlist_group = PlaylistGroup(name="playlist", description="Saved playlists for everyone on the server")
